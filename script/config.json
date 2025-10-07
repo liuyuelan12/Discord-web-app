@@ -1,0 +1,23 @@
+{
+  "proxy": {
+    "enabled": true,
+    "host": "102.177.146.156",
+    "port": 50101,
+    "username": "zhouhaha",
+    "password": "963091790"
+  },
+  "discord": {
+    "apiBase": "https://discord.com/api/v10",
+    "tokenFile": "./Discord_Token.json"
+  },
+  "autoPost": {
+    "channelId": "1424343919742812213",
+    "csvFile": "./发言脚本/FightID/general_messages.csv",
+    "messageDelay": 5000,
+    "deleteDelay": 0
+  },
+  "scraper": {
+    "outputDir": "./发言脚本",
+    "timeout": 30000
+  }
+}
