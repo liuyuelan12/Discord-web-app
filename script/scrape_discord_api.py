@@ -11,10 +11,11 @@ import os
 import argparse
 import aiohttp
 import ssl
+import re
 from aiohttp_socks import ProxyConnector
 from datetime import datetime
 from pathlib import Path
-from typing import Optional, List, Dict
+from typing import Optional, List, Dict, Tuple
 
 # 导入配置
 from config import (
@@ -25,6 +26,23 @@ from config import (
     RATE_LIMIT_DELAY,
     get_proxy_url
 )
+
+
+def parse_discord_url(url: str) -> Optional[Tuple[str, str]]:
+    """
+    解析Discord频道URL
+    
+    Args:
+        url: Discord URL，格式如 https://discord.com/channels/SERVER_ID/CHANNEL_ID
+        
+    Returns:
+        (guild_id, channel_id) 或 None
+    """
+    pattern = r'discord\.com/channels/(\d+)/(\d+)'
+    match = re.search(pattern, url)
+    if match:
+        return (match.group(1), match.group(2))
+    return None
 
 
 class DiscordAPIScraper:
@@ -111,6 +129,61 @@ class DiscordAPIScraper:
         except Exception as e:
             print(f"❌ 获取频道列表失败: {e}")
             return []
+    
+    async def check_channel_access(self, guild_id: str, channel_id: str) -> Tuple[bool, str]:
+        """
+        检查token是否有权限访问指定频道
+        
+        Args:
+            guild_id: 服务器ID
+            channel_id: 频道ID
+            
+        Returns:
+            (has_access: bool, message: str)
+        """
+        headers = {
+            'Authorization': self.token,
+            'Content-Type': 'application/json',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+        }
+        
+        try:
+            # 检查是否在服务器中
+            async with self.session.get(
+                f"{DISCORD_API_BASE}/users/@me/guilds",
+                headers=headers,
+                ssl=self.ssl_context
+            ) as response:
+                if response.status != 200:
+                    return False, f"无法获取服务器列表 (状态码: {response.status})"
+                
+                guilds = await response.json()
+                guild_ids = [g['id'] for g in guilds]
+                
+                if guild_id not in guild_ids:
+                    return False, "❌ Token未加入此服务器"
+            
+            # 检查是否有权限访问频道
+            async with self.session.get(
+                f"{DISCORD_API_BASE}/channels/{channel_id}",
+                headers=headers,
+                ssl=self.ssl_context
+            ) as response:
+                if response.status == 403:
+                    return False, "❌ 无此频道的访问权限"
+                elif response.status == 404:
+                    return False, "❌ 频道不存在"
+                elif response.status != 200:
+                    return False, f"❌ 检查频道失败 (状态码: {response.status})"
+                
+                channel_data = await response.json()
+                channel_name = channel_data.get('name', 'Unknown')
+                guild_name_id = channel_data.get('guild_id', '')
+                
+                return True, f"✓ 有权限访问频道 #{channel_name}"
+        
+        except Exception as e:
+            return False, f"❌ 检查权限时出错: {e}"
     
     async def get_messages(self, channel_id: str, limit: int) -> List[Dict]:
         """
@@ -228,35 +301,62 @@ class DiscordAPIScraper:
             print(f"读取配置文件失败: {e}")
         return None
     
-    async def scrape_and_save(self, channel_id: str, limit: int, config_path: str):
+    async def scrape_and_save(self, channel_id: str, limit: int):
         """
         爬取并保存消息
         
         Args:
             channel_id: 频道ID
             limit: 爬取消息数量
-            config_path: 配置文件路径
         """
-        # 获取服务器信息
-        server_info = self.get_server_info(channel_id, config_path)
-        if not server_info:
-            server_info = {
-                'server_name': f'Server_{channel_id}',
-                'channel_name': 'Unknown',
-                'channel_key': 'unknown'
-            }
+        # 从API获取频道信息
+        headers = {
+            'Authorization': self.token,
+            'Content-Type': 'application/json',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        }
         
-        print(f"\n频道: {server_info['channel_name']}")
-        print(f"服务器: {server_info['server_name']}")
+        try:
+            async with self.session.get(
+                f"{DISCORD_API_BASE}/channels/{channel_id}",
+                headers=headers,
+                ssl=self.ssl_context
+            ) as response:
+                if response.status == 200:
+                    channel_data = await response.json()
+                    channel_name = channel_data.get('name', f'channel_{channel_id}')
+                    guild_id = channel_data.get('guild_id')
+                    
+                    # 获取服务器名称
+                    server_name = f'Server_{guild_id}'
+                    if guild_id:
+                        async with self.session.get(
+                            f"{DISCORD_API_BASE}/guilds/{guild_id}",
+                            headers=headers,
+                            ssl=self.ssl_context
+                        ) as guild_response:
+                            if guild_response.status == 200:
+                                guild_data = await guild_response.json()
+                                server_name = guild_data.get('name', server_name)
+                else:
+                    channel_name = f'channel_{channel_id}'
+                    server_name = f'Server_{channel_id}'
+        except Exception as e:
+            print(f"⚠️  无法获取频道信息，使用默认名称: {e}")
+            channel_name = f'channel_{channel_id}'
+            server_name = f'Server_{channel_id}'
+        
+        print(f"\n频道: {channel_name}")
+        print(f"服务器: {server_name}")
         
         # 创建输出目录
-        server_dir = Path(self.output_base_dir) / server_info['server_name']
+        server_dir = Path(self.output_base_dir) / server_name
         media_dir = server_dir / 'media'
         server_dir.mkdir(parents=True, exist_ok=True)
         media_dir.mkdir(exist_ok=True)
         
         # CSV文件路径
-        csv_path = server_dir / f"{server_info['channel_key']}_messages.csv"
+        csv_path = server_dir / f"{channel_name}_messages.csv"
         
         # 获取消息
         messages = await self.get_messages(channel_id, limit)
@@ -402,26 +502,28 @@ async def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 示例:
-  # 列出所有频道
-  python scrape_discord_api.py --list
-  
-  # 使用索引
-  python scrape_discord_api.py -c 0 -l 100
-  
-  # 使用服务器+频道名
-  python scrape_discord_api.py -c "fightid general" -l 500
+  # 使用Discord URL
+  python scrape_discord_api.py -u "https://discord.com/channels/1234567890/9876543210" -l 100
   
   # 使用Channel ID
   python scrape_discord_api.py -c 1329891599861415949 -l 500
   
+  # 列出所有可访问的频道
+  python scrape_discord_api.py --list
+  
   # 不使用代理
-  python scrape_discord_api.py -c 0 -l 100 --no-proxy
+  python scrape_discord_api.py -u "https://discord.com/channels/xxx/xxx" --no-proxy
         """
     )
     
     parser.add_argument(
+        '-u', '--url',
+        help='Discord频道URL，格式: https://discord.com/channels/SERVER_ID/CHANNEL_ID'
+    )
+    
+    parser.add_argument(
         '-c', '--channel',
-        help='频道标识：索引数字、"服务器名 频道名"、或Channel ID'
+        help='频道ID (可选，如果不使用URL)'
     )
     
     parser.add_argument(
@@ -448,12 +550,6 @@ async def main():
         '--token-file',
         default='/Users/Zhuanz/Desktop/Discord Bot/Discord_Token.json',
         help='Token文件路径'
-    )
-    
-    parser.add_argument(
-        '--config-file',
-        default='/Users/Zhuanz/Desktop/Discord Bot/Server_and_Channel.json',
-        help='服务器配置文件路径'
     )
     
     parser.add_argument(
@@ -514,20 +610,31 @@ async def main():
             except Exception as e:
                 print(f"❌ 获取频道列表失败: {e}")
                 return
-        else:
-            # 使用配置文件
-            list_channels(args.config_file)
+    
+    # 检查是否提供了URL或频道ID
+    if not args.url and not args.channel:
+        parser.error("需要提供 -u/--url 或 -c/--channel 参数，或使用 --list 列出频道")
+    
+    # 解析频道ID和服务器ID
+    guild_id = None
+    channel_id = None
+    
+    if args.url:
+        # 从URL解析
+        parsed = parse_discord_url(args.url)
+        if not parsed:
+            print(f"\n❌ 无效的Discord URL: {args.url}")
+            print("URL格式应为: https://discord.com/channels/SERVER_ID/CHANNEL_ID\n")
             return
+        guild_id, channel_id = parsed
+        print(f"✓ 从URL解析: 服务器ID={guild_id}, 频道ID={channel_id}")
+    elif args.channel:
+        # 直接使用频道ID
+        channel_id = args.channel
+        print(f"✓ 使用频道ID: {channel_id}")
     
-    # 检查是否提供了频道参数
-    if not args.channel:
-        parser.error("需要提供 -c/--channel 参数或使用 --list 列出频道")
-    
-    # 解析频道ID
-    channel_id = resolve_channel_id(args.channel, args.config_file)
     if not channel_id:
-        print(f"\n❌ 无法解析频道: {args.channel}")
-        print("\n提示: 使用 --list 查看所有可用频道\n")
+        print("\n❌ 无法确定频道ID\n")
         return
     
     # 读取token
@@ -546,11 +653,22 @@ async def main():
         print(f"❌ 读取token文件失败: {e}")
         return
     
-    # 创建爬取器并执行
+    # 创建爬取器并检查权限
     use_proxy = not args.no_proxy  # 默认使用代理
     try:
         async with DiscordAPIScraper(token, args.output_dir, use_proxy) as scraper:
-            await scraper.scrape_and_save(channel_id, args.limit, args.config_file)
+            # 如果有guild_id，检查权限
+            if guild_id:
+                print(f"\n正在检查频道访问权限...")
+                has_access, message = await scraper.check_channel_access(guild_id, channel_id)
+                print(message)
+                
+                if not has_access:
+                    return
+            
+            # 执行爬取
+            print(f"\n开始爬取频道 {channel_id} 的消息 (最多 {args.limit} 条)...\n")
+            await scraper.scrape_and_save(channel_id, args.limit)
     except KeyboardInterrupt:
         print("\n\n⚠️  用户中断")
     except Exception as e:
