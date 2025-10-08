@@ -47,7 +47,10 @@ export async function GET(request: NextRequest) {
 
     const contentType = contentTypes[ext] || 'application/octet-stream'
 
-    return new Response(fileBuffer, {
+    // 将Buffer转换为Uint8Array
+    const uint8Array = new Uint8Array(fileBuffer)
+
+    return new Response(uint8Array, {
       headers: {
         'Content-Type': contentType,
         'Content-Disposition': `attachment; filename="${fileName}"`,
