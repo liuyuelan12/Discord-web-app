@@ -47,7 +47,7 @@ export async function GET(request: NextRequest) {
 
     const contentType = contentTypes[ext] || 'application/octet-stream'
 
-    return new NextResponse(fileBuffer, {
+    return new Response(fileBuffer, {
       headers: {
         'Content-Type': contentType,
         'Content-Disposition': `attachment; filename="${fileName}"`,
